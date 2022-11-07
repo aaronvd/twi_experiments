@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from pynufft import NUFFT
+import scipy.interpolate
 import scipy.constants
 import types
 import plotly.graph_objects as go
@@ -33,12 +34,12 @@ class MonostaticReconstruction():
         self.measurements = measurements
         self.volume = types.SimpleNamespace()
 
-    def reconstruct(self, scene_lengths, scene_deltas, Lxa, Lya, fc, bw, scene_offsets=None, method='RMA', pad_amount=100):
+    def reconstruct(self, scene_lengths, scene_deltas, Lxa, Lya, fc, bw, scene_offsets=None, delta_f_indx=1, method='RMA-NUFFT', pad_amount=100):
         
         if scene_offsets is None:
             scene_offsets = (0, 0, self.z_offset)
         
-        if method == 'RMA':
+        if method == 'RMA-NUFFT':
             ######################################
             ########    set up geometry   ########
             ######################################
@@ -46,6 +47,7 @@ class MonostaticReconstruction():
             self.volume.delta_x, self.volume.delta_y, self.volume.delta_z = scene_deltas
             self.volume.x_offset, self.volume.y_offset, self.volume.z_offset = scene_offsets
             f_indx = np.argwhere(np.abs(self.f - fc)<=bw/2)[:,0]
+            f_indx = np.arange(f_indx[0], f_indx[-1], delta_f_indx)
             f = self.f[f_indx]
             lam = C/f
             k = 2*np.pi/lam
@@ -103,6 +105,69 @@ class MonostaticReconstruction():
 
             self.image = NufftObj.adjoint(measurements_reshape)
 
+        if method == 'RMA-interp':
+            ######################################
+            ########    set up geometry   ########
+            ######################################
+            self.volume.Lx, self.volume.Ly, self.volume.Lz = scene_lengths
+            self.volume.delta_x, self.volume.delta_y, self.volume.delta_z = scene_deltas
+            self.volume.x_offset, self.volume.y_offset, self.volume.z_offset = scene_offsets
+            f_indx = np.argwhere(np.abs(self.f - fc)<=bw/2)[:,0]        # truncating frequency points to bandwidth
+            f_indx = np.arange(f_indx[0], f_indx[-1], delta_f_indx)     # downsampling frequency vector
+            f = self.f[f_indx]
+            lam = C/f
+            k = 2*np.pi/lam
+            indx_center_x = self.array.X.shape[1]//2    
+            indx_center_y = self.array.Y.shape[0]//2
+            measurements = self.measurements[int(indx_center_y-Lya//(2*self.array.delta_y)):int((indx_center_y+Lya//(2*self.array.delta_y))),       # truncating measurements
+                            int(indx_center_x-Lxa//(2*self.array.delta_x)):int((indx_center_x+Lxa//(2*self.array.delta_x))),
+                            f_indx]
+            self.measurement_truncated = measurements
+            self.f_indx = f_indx
+
+            ######################################
+            ########      reconstruct     ########
+            ######################################
+            pad_x = int(self.volume.Lx // self.array.delta_x)
+            pad_y = int(self.volume.Ly // self.array.delta_y)
+
+            measurements_pad = self.padortruncate(measurements, pad_y, pad_x, measurements.shape[2])
+            Ny_pad, Nx_pad = measurements_pad.shape[:-1]
+            measurements_ft = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(
+                        measurements_pad,
+                        axes=(0,1)), axes=(0,1)), axes=(0,1))
+            delta_kx = 2*np.pi/(self.array.delta_x * Nx_pad)
+            delta_ky = 2*np.pi/(self.array.delta_y * Ny_pad)
+            kx = np.arange(-np.floor(Nx_pad/2), np.ceil(Nx_pad/2)) * delta_kx
+            ky = np.arange(-np.floor(Ny_pad/2), np.ceil(Ny_pad/2)) * delta_ky
+            Kx, Ky, K = np.meshgrid(kx.astype(np.complex64), ky.astype(np.complex64), k.astype(np.complex64), indexing='xy')
+            Kz = np.sqrt(4*K**2 - Kx**2 - Ky**2)
+            measurements_ft[np.imag(Kz)!=0] = 0
+            Kz[np.imag(Kz)!=0] = 0
+            Kz = np.real(Kz)
+
+            filt = np.nan_to_num(K / Kz**2)
+            measurements_ft = measurements_ft * np.exp(1j * Kx * self.volume.x_offset) * np.exp(1j * Ky * self.volume.y_offset) * np.exp(1j * Kz * self.volume.z_offset) / filt
+
+            delta_kz = 2*np.pi/self.volume.Lz
+            kz_linear = np.arange(np.amin(Kz), np.amax(Kz), delta_kz)
+
+            measurements_stolt = np.zeros((measurements_ft.shape[0], measurements_ft.shape[1], kz_linear.size), dtype=np.complex128)
+            for i in range(measurements_ft.shape[0]):
+                for j in range(measurements_ft.shape[1]):
+                    if (Kz[i,j,Kz[i,j,:]!=0]).size >= 2:
+                        measurements_stolt[i,j,:] = self.interp1d(kz_linear, Kz[i,j,Kz[i,j,:]!=0], measurements_ft[i,j,Kz[i,j]!=0], kind='linear')
+            measurements_stolt = np.transpose(np.nan_to_num(measurements_stolt), (1, 0, 2))
+
+            self.image = np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(measurements_stolt)))
+            self.volume.x = np.linspace(-self.volume.Lx/2, self.volume.Lx/2, measurements_stolt.shape[0]) + self.volume.x_offset
+            self.volume.y = np.linspace(-self.volume.Ly/2, self.volume.Ly/2, measurements_stolt.shape[1]) + self.volume.y_offset
+            self.volume.z = np.linspace(-self.volume.Lz/2, self.volume.Lz/2, measurements_stolt.shape[2]) + self.volume.z_offset
+            self.volume.X, self.volume.Y, self.volume.Z = np.meshgrid(self.volume.x, self.volume.y, self.volume.z, indexing='ij')
+
+            delta_x = self.volume.x[1] - self.volume.x[0]
+            self.resample(delta_x / self.volume.delta_x)
+
     def resample(self, scale):
         # self.image = self.fft_resample(self.image, int(scale*self.image.shape[0]), int(scale*self.image.shape[1]), int(scale*self.image.shape[2]))
         self.image = zoom(self.image, (scale, scale, scale))
@@ -113,7 +178,6 @@ class MonostaticReconstruction():
 
     def plot(self, plot_type='3D', **kwargs):
 
-        cmap = kwargs.get('cmap', 'viridis')
         scale = kwargs.get('scale', 'dB')
 
         if scale == 'linear':
@@ -124,6 +188,7 @@ class MonostaticReconstruction():
             colormax = kwargs.get('colormax', 0)
             
         if plot_type == '3D':
+            cmap = kwargs.get('cmap', 'Turbo')
 
             im_plot = np.abs(self.image)**2
             im_plot = im_plot/np.amax(im_plot)
@@ -152,7 +217,7 @@ class MonostaticReconstruction():
         if plot_type == 'section':
             slice_axis = kwargs.get('slice_axis', 'z')
             scale = kwargs.get('scale', 'dB')
-            cmap = kwargs.get('cmap', 'viridis')
+            cmap = kwargs.get('cmap', 'turbo')
             if scale == 'linear':
                 colormin = kwargs.get('colormin', 0)
                 colormax = kwargs.get('colormax', 1)
@@ -203,6 +268,8 @@ class MonostaticReconstruction():
             plt.show()     
 
         if plot_type == 'xy':
+            cmap = kwargs.get('cmap', 'turbo')
+            
             im_plot = np.transpose(np.mean(np.abs(self.image)**2, 2), (1,0))
             im_plot = im_plot/np.amax(im_plot)
             if scale == 'dB':
@@ -266,6 +333,13 @@ class MonostaticReconstruction():
         "font.family" : font,
         "mathtext.fontset" : "stix"}
         plt.rcParams.update(rc)
+
+    @staticmethod
+    def interp1d(x_new, x, y, kind='linear'):
+        f_real = scipy.interpolate.interp1d(x, np.real(y), kind=kind, bounds_error=False, fill_value=0)
+        f_imag = scipy.interpolate.interp1d(x, np.imag(y), kind=kind, bounds_error=False, fill_value=0)
+        f_interp = f_real(x_new) + 1j*f_imag(x_new)
+        return f_interp
 
 
 
