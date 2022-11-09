@@ -8,6 +8,8 @@ import plotly.graph_objects as go
 import plotly.io as pio
 pio.renderers.default = "browser"
 from scipy.ndimage import zoom
+from tqdm import tqdm
+from matplotlib.widgets import Slider
 
 mm = 1E-3
 C = scipy.constants.c
@@ -301,6 +303,46 @@ class MonostaticReconstruction():
             else:
                 plt.colorbar(label='dB')
             plt.show()               
+
+    def focus_sweep(self, measurements, L_list, a_horn=None, resample=1):
+        self.L_list = L_list
+        if a_horn is None:
+            a_horn = 10.668*mm      # WR42 waveguide width
+
+        lam = C/self.f
+        k = 2*np.pi/lam
+        beta_g = np.sqrt(k**2 - (np.pi/a_horn)**2)
+
+        self.corrected_images = []
+        for i in tqdm(range(L_list.size)):
+            phase_error = np.exp(-1j*2*beta_g*self.L_list[i])    # 2 for transmit and receive path
+            measurements_corrected = measurements / phase_error
+            self.reconstruct(measurements_corrected)
+            self.resample(resample)
+            im_plot = np.transpose(np.mean(np.abs(self.image)**2, 2), (1,0))
+            self.corrected_images.append(im_plot/np.amax(im_plot))
+
+        self.set_font(fontsize=12)
+
+        ### plot
+        fig, ax = plt.subplots()
+        ax_slider = plt.axes([0.20, 0.01, 0.65, 0.03], facecolor='yellow')
+        slider = Slider(
+                ax=ax_slider,
+                label='Image Index',
+                valmin=0,
+                valmax=len(self.corrected_images)-1,
+                valinit=0,
+            )
+        image = self.corrected_images[0]
+        img = ax.imshow(image, origin='lower', cmap='turbo')
+        ax.set_title('L = {}'.format(L_list[int(slider.val)]))
+        def update(val):
+            ax.imshow(self.corrected_images[int(slider.val)], origin='lower', cmap='turbo')
+            ax.set_title('L = {}'.format(L_list[int(slider.val)]))
+            fig.canvas.draw_idle()
+        slider.on_changed(update)
+        plt.show()
 
     def fft_resample(self, img, Nx, Ny, Nz):
         '''
