@@ -16,13 +16,15 @@ class MonostaticReconstruction():
     '''
     Class for reconstructing simulated or experimental monostatic imaging data.
     '''
-    def __init__(self, f, Xa, Ya, z_offset, measurements):
+    def __init__(self, f, Xa, Ya, z_offset):
         self.f = f
         self.lam = C/self.f
         self.k = 2*np.pi/self.lam
         self.array = types.SimpleNamespace()
         self.array.X = Xa
         self.array.Y = Ya
+        self.indx_center_x = self.array.X.shape[1]//2
+        self.indx_center_y = self.array.Y.shape[0]//2
         self.z_offset = z_offset
 
         xa = np.unique(Xa)
@@ -31,132 +33,141 @@ class MonostaticReconstruction():
         self.array.delta_y = ya[1] - ya[0]
         self.array.Lx = np.amax(xa) - np.amin(xa)
         self.array.Ly = np.amax(ya) - np.amin(ya)
-        self.measurements = measurements
         self.volume = types.SimpleNamespace()
 
-    def reconstruct(self, scene_lengths, scene_deltas, Lxa, Lya, fc, bw, scene_offsets=None, delta_f_indx=1, method='RMA-NUFFT', pad_amount=100):
-        
+    def setup(self, scene_lengths, scene_deltas, Lxa, Lya, fc, bw, scene_offsets=None, delta_f_indx=1, method='RMA-NUFFT', pad_amount=100):
+
+        self.method = method
         if scene_offsets is None:
-            scene_offsets = (0, 0, self.z_offset)
-        
-        if method == 'RMA-NUFFT':
-            ######################################
-            ########    set up geometry   ########
-            ######################################
+            self.scene_offsets = (0, 0, self.z_offset)
+
+        if self.method == 'RMA-NUFFT':
             self.volume.Lx, self.volume.Ly, self.volume.Lz = scene_lengths
             self.volume.delta_x, self.volume.delta_y, self.volume.delta_z = scene_deltas
             self.volume.x_offset, self.volume.y_offset, self.volume.z_offset = scene_offsets
-            f_indx = np.argwhere(np.abs(self.f - fc)<=bw/2)[:,0]
-            f_indx = np.arange(f_indx[0], f_indx[-1], delta_f_indx)
-            f = self.f[f_indx]
+            self.f_indx = np.argwhere(np.abs(self.f - fc)<=bw/2)[:,0]
+            self.f_indx = np.arange(self.f_indx[0], self.f_indx[-1], delta_f_indx)
+            f = self.f[self.f_indx]
             lam = C/f
             k = 2*np.pi/lam
-            indx_center_x = self.array.X.shape[1]//2
-            indx_center_y = self.array.Y.shape[0]//2
-            measurements = self.measurements[int(indx_center_y-Lya//(2*self.array.delta_y)):int((indx_center_y+Lya//(2*self.array.delta_y))),
-                            int(indx_center_x-Lxa//(2*self.array.delta_x)):int((indx_center_x+Lxa//(2*self.array.delta_x))),
-                            f_indx]
-            self.measurement_truncated = measurements
-            self.f_indx = f_indx
+
+            self.array.Lxa_trunc = Lxa
+            self.array.Lya_trunc = Lya
             
-            Nkx, Nky, Nkz = (int(4*np.amax(k) * self.volume.Lx / (2*np.pi)), 
+            self.Nkx, self.Nky, self.Nkz = (int(4*np.amax(k) * self.volume.Lx / (2*np.pi)), 
                              int(4*np.amax(k) * self.volume.Ly / (2*np.pi)), 
                              int(4*np.amax(k) * self.volume.Lz / (2*np.pi)))
-            Nx, Ny, Nz = (int(2*np.pi * Nkx / (4*np.amax(k) * self.volume.delta_x)), 
-                          int(2*np.pi * Nky / (4*np.amax(k) * self.volume.delta_y)), 
-                          int(2*np.pi * Nkz / (4*np.amax(k) * self.volume.delta_z)))
-            if Nz == 0:
-                Nz += 1
-            if Nkz == 0:
-                Nkz += 1
+            self.Nx, self.Ny, self.Nz = (int(2*np.pi * self.Nkx / (4*np.amax(k) * self.volume.delta_x)), 
+                          int(2*np.pi * self.Nky / (4*np.amax(k) * self.volume.delta_y)), 
+                          int(2*np.pi * self.Nkz / (4*np.amax(k) * self.volume.delta_z)))
+            if self.Nz == 0:
+                self.Nz += 1
+            if self.Nkz == 0:
+                self.Nkz += 1
 
-            self.volume.x = np.arange(-np.floor(Nx/2), np.ceil(Nx/2)) * self.volume.delta_x + self.volume.x_offset
-            self.volume.y = np.arange(-np.floor(Ny/2), np.ceil(Ny/2)) * self.volume.delta_y + self.volume.y_offset
-            self.volume.z = np.arange(-np.floor(Nz/2), np.ceil(Nz/2)) * self.volume.delta_z + self.volume.z_offset
+            self.volume.x = np.arange(-np.floor(self.Nx/2), np.ceil(self.Nx/2)) * self.volume.delta_x + self.volume.x_offset
+            self.volume.y = np.arange(-np.floor(self.Ny/2), np.ceil(self.Ny/2)) * self.volume.delta_y + self.volume.y_offset
+            self.volume.z = np.arange(-np.floor(self.Nz/2), np.ceil(self.Nz/2)) * self.volume.delta_z + self.volume.z_offset
             self.volume.X, self.volume.Y, self.volume.Z = np.meshgrid(self.volume.x, self.volume.y, self.volume.z, indexing='ij')
 
-            ######################################
-            ########      reconstruct     ########
-            ######################################
-            measurements_pad = np.pad(measurements, ((pad_amount, pad_amount), (pad_amount, pad_amount), (0, 0)), mode='constant')
-            Ny_pad, Nx_pad = measurements_pad.shape[:-1]
-            measurements_ft = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(
-                        measurements_pad,
-                        axes=(0,1)), axes=(0,1)), axes=(0,1))
+            dummy_array = np.ones((self.array.X.shape[0], self.array.X.shape[1]))
+            dummy_array = dummy_array[int(self.indx_center_y-self.array.Lya_trunc//(2*self.array.delta_y)):int((self.indx_center_y+self.array.Lya_trunc//(2*self.array.delta_y))),
+                            int(self.indx_center_x-self.array.Lxa_trunc//(2*self.array.delta_x)):int((self.indx_center_x+self.array.Lxa_trunc//(2*self.array.delta_x)))]
+
+            self.pad_amount = pad_amount
+            dummy_pad = np.pad(dummy_array, ((self.pad_amount, self.pad_amount), (self.pad_amount, self.pad_amount)), mode='constant')
+            Ny_pad, Nx_pad = dummy_pad.shape
             delta_kx = 2*np.pi/(self.array.delta_x * Nx_pad)
             delta_ky = 2*np.pi/(self.array.delta_y * Ny_pad)
             kx = np.arange(-np.floor(Nx_pad/2), np.ceil(Nx_pad/2)) * delta_kx
             ky = np.arange(-np.floor(Ny_pad/2), np.ceil(Ny_pad/2)) * delta_ky
-            Kx, Ky, K = np.meshgrid(kx.astype(np.complex64), ky.astype(np.complex64), k.astype(np.complex64), indexing='xy')
-            Kz = np.sqrt(4*K**2 - Kx**2 - Ky**2)
-            Kz[np.imag(Kz)!=0] = 0
-            measurements_ft[np.imag(Kz)!=0] = 0
+            self.Kx, self.Ky, K = np.meshgrid(kx.astype(np.complex64), ky.astype(np.complex64), k.astype(np.complex64), indexing='xy')
+            self.Kz = np.sqrt(4*K**2 - self.Kx**2 - self.Ky**2)
+            self.evanescent_indx = np.where(np.imag(self.Kz)!=0)
+            self.Kz[self.evanescent_indx] = 0
+            self.filt = np.nan_to_num(K / self.Kz**2)
 
-            filt = np.nan_to_num(K / Kz**2)
-            measurements_ft = measurements_ft * np.exp(1j * Kx * self.volume.x_offset) * np.exp(1j * Ky * self.volume.y_offset) * np.exp(1j * Kz * self.volume.z_offset) / filt
+            self.K_array = np.stack((np.real(self.Kx).flatten(), np.real(self.Ky).flatten(), np.real(self.Kz).flatten()), axis=1) * np.pi/(2*np.amax(k))   # normalizing to pi
 
-            NufftObj = NUFFT()
-            Jd = (3, 3, 3)
-
-            K_array = np.stack((np.real(Kx).flatten(), np.real(Ky).flatten(), np.real(Kz).flatten()), axis=1) * np.pi/(2*np.amax(k))   # normalizing to pi
-            measurements_reshape = measurements_ft.flatten()
-
-            NufftObj.plan(K_array, (Nx, Ny, Nz), (Nkx, Nky, Nkz), Jd)
-
-            self.image = NufftObj.adjoint(measurements_reshape)
-
-        if method == 'RMA-interp':
-            ######################################
-            ########    set up geometry   ########
-            ######################################
+            self.NufftObj = NUFFT()
+            self.Jd = (3, 3, 3)
+            self.NufftObj.plan(self.K_array, (self.Nx, self.Ny, self.Nz), (self.Nkx, self.Nky, self.Nkz), self.Jd)
+        
+        if self.method == 'RMA-interp':
             self.volume.Lx, self.volume.Ly, self.volume.Lz = scene_lengths
             self.volume.delta_x, self.volume.delta_y, self.volume.delta_z = scene_deltas
             self.volume.x_offset, self.volume.y_offset, self.volume.z_offset = scene_offsets
-            f_indx = np.argwhere(np.abs(self.f - fc)<=bw/2)[:,0]        # truncating frequency points to bandwidth
-            f_indx = np.arange(f_indx[0], f_indx[-1], delta_f_indx)     # downsampling frequency vector
-            f = self.f[f_indx]
+            self.f_indx = np.argwhere(np.abs(self.f - fc)<=bw/2)[:,0]
+            self.f_indx = np.arange(self.f_indx[0], self.f_indx[-1], delta_f_indx)
+            f = self.f[self.f_indx]
             lam = C/f
             k = 2*np.pi/lam
-            indx_center_x = self.array.X.shape[1]//2    
-            indx_center_y = self.array.Y.shape[0]//2
-            measurements = self.measurements[int(indx_center_y-Lya//(2*self.array.delta_y)):int((indx_center_y+Lya//(2*self.array.delta_y))),       # truncating measurements
-                            int(indx_center_x-Lxa//(2*self.array.delta_x)):int((indx_center_x+Lxa//(2*self.array.delta_x))),
-                            f_indx]
-            self.measurement_truncated = measurements
-            self.f_indx = f_indx
 
-            ######################################
-            ########      reconstruct     ########
-            ######################################
-            pad_x = int(self.volume.Lx // self.array.delta_x)
-            pad_y = int(self.volume.Ly // self.array.delta_y)
+            self.array.Lxa_trunc = Lxa
+            self.array.Lya_trunc = Lya
 
-            measurements_pad = self.padortruncate(measurements, pad_y, pad_x, measurements.shape[2])
-            Ny_pad, Nx_pad = measurements_pad.shape[:-1]
-            measurements_ft = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(
-                        measurements_pad,
-                        axes=(0,1)), axes=(0,1)), axes=(0,1))
+            self.pad_x = int(self.volume.Lx // self.array.delta_x)
+            self.pad_y = int(self.volume.Ly // self.array.delta_y)
+
+            dummy_array = np.ones((self.array.X.shape[0], self.array.X.shape[1], self.f.size))
+            dummy_array = dummy_array[int(self.indx_center_y-self.array.Lya_trunc//(2*self.array.delta_y)):int((self.indx_center_y+self.array.Lya_trunc//(2*self.array.delta_y))),
+                            int(self.indx_center_x-self.array.Lxa_trunc//(2*self.array.delta_x)):int((self.indx_center_x+self.array.Lxa_trunc//(2*self.array.delta_x))),
+                            self.f_indx]
+
+            dummy_pad = self.padortruncate(dummy_array, self.pad_y, self.pad_x, dummy_array.shape[2])
+            Ny_pad, Nx_pad = dummy_pad.shape[:-1]
             delta_kx = 2*np.pi/(self.array.delta_x * Nx_pad)
             delta_ky = 2*np.pi/(self.array.delta_y * Ny_pad)
             kx = np.arange(-np.floor(Nx_pad/2), np.ceil(Nx_pad/2)) * delta_kx
             ky = np.arange(-np.floor(Ny_pad/2), np.ceil(Ny_pad/2)) * delta_ky
-            Kx, Ky, K = np.meshgrid(kx.astype(np.complex64), ky.astype(np.complex64), k.astype(np.complex64), indexing='xy')
-            Kz = np.sqrt(4*K**2 - Kx**2 - Ky**2)
-            measurements_ft[np.imag(Kz)!=0] = 0
-            Kz[np.imag(Kz)!=0] = 0
-            Kz = np.real(Kz)
+            self.Kx, self.Ky, K = np.meshgrid(kx.astype(np.complex64), ky.astype(np.complex64), k.astype(np.complex64), indexing='xy')
+            self.Kz = np.sqrt(4*K**2 - self.Kx**2 - self.Ky**2)
+            self.evanescent_indx = np.where(np.imag(self.Kz)!=0)
+            self.Kz[self.evanescent_indx] = 0
+            self.Kz = np.real(self.Kz)
+            self.filt = np.nan_to_num(K / self.Kz**2)
 
-            filt = np.nan_to_num(K / Kz**2)
-            measurements_ft = measurements_ft * np.exp(1j * Kx * self.volume.x_offset) * np.exp(1j * Ky * self.volume.y_offset) * np.exp(1j * Kz * self.volume.z_offset) / filt
+    def reconstruct(self, measurements=None):
+        
+        if self.method == 'RMA-NUFFT':
+            measurements = measurements[int(self.indx_center_y-self.array.Lya_trunc//(2*self.array.delta_y)):int((self.indx_center_y+self.array.Lya_trunc//(2*self.array.delta_y))),
+                            int(self.indx_center_x-self.array.Lxa_trunc//(2*self.array.delta_x)):int((self.indx_center_x+self.array.Lxa_trunc//(2*self.array.delta_x))),
+                            self.f_indx]
+            self.measurement_truncated = measurements
+
+            measurements_pad = np.pad(measurements, ((self.pad_amount, self.pad_amount), (self.pad_amount, self.pad_amount), (0, 0)), mode='constant')
+            
+            measurements_ft = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(
+                        measurements_pad,
+                        axes=(0,1)), axes=(0,1)), axes=(0,1))
+            
+            measurements_ft[self.evanescent_indx] = 0
+            measurements_ft = measurements_ft * np.exp(1j * self.Kx * self.volume.x_offset) * np.exp(1j * self.Ky * self.volume.y_offset) * np.exp(1j * self.Kz * self.volume.z_offset) / self.filt
+            measurements_reshape = measurements_ft.flatten()
+
+            self.image = self.NufftObj.adjoint(measurements_reshape)
+
+        if self.method == 'RMA-interp':
+            measurements = measurements[int(self.indx_center_y-self.array.Lya_trunc//(2*self.array.delta_y)):int((self.indx_center_y+self.array.Lya_trunc//(2*self.array.delta_y))),
+                            int(self.indx_center_x-self.array.Lxa_trunc//(2*self.array.delta_x)):int((self.indx_center_x+self.array.Lxa_trunc//(2*self.array.delta_x))),
+                            self.f_indx]
+            self.measurement_truncated = measurements            
+
+            measurements_pad = self.padortruncate(measurements, self.pad_y, self.pad_x, measurements.shape[2])
+            measurements_ft = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(
+                        measurements_pad,
+                        axes=(0,1)), axes=(0,1)), axes=(0,1))
+            measurements_ft[self.evanescent_indx] = 0
+            measurements_ft = measurements_ft * np.exp(1j * self.Kx * self.volume.x_offset) * np.exp(1j * self.Ky * self.volume.y_offset) * np.exp(1j * self.Kz * self.volume.z_offset) / self.filt
 
             delta_kz = 2*np.pi/self.volume.Lz
-            kz_linear = np.arange(np.amin(Kz), np.amax(Kz), delta_kz)
+            kz_linear = np.arange(np.amin(self.Kz), np.amax(self.Kz), delta_kz)
 
             measurements_stolt = np.zeros((measurements_ft.shape[0], measurements_ft.shape[1], kz_linear.size), dtype=np.complex128)
             for i in range(measurements_ft.shape[0]):
                 for j in range(measurements_ft.shape[1]):
-                    if (Kz[i,j,Kz[i,j,:]!=0]).size >= 2:
-                        measurements_stolt[i,j,:] = self.interp1d(kz_linear, Kz[i,j,Kz[i,j,:]!=0], measurements_ft[i,j,Kz[i,j]!=0], kind='linear')
+                    if (self.Kz[i,j,self.Kz[i,j,:]!=0]).size >= 2:
+                        measurements_stolt[i,j,:] = self.interp1d(kz_linear, self.Kz[i,j,self.Kz[i,j,:]!=0], measurements_ft[i,j,self.Kz[i,j]!=0], kind='cubic')
             measurements_stolt = np.transpose(np.nan_to_num(measurements_stolt), (1, 0, 2))
 
             self.image = np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(measurements_stolt)))
