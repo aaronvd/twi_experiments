@@ -11,6 +11,13 @@ from scipy.ndimage import zoom
 from tqdm import tqdm
 from matplotlib.widgets import Slider
 
+def set_font(fontsize=18, font="Times New Roman"):
+    rc = {"font.size" : fontsize,
+    "font.family" : font,
+    "mathtext.fontset" : "stix"}
+    plt.rcParams.update(rc)
+set_font()
+
 mm = 1E-3
 C = scipy.constants.c
 
@@ -37,7 +44,14 @@ class MonostaticReconstruction():
         self.array.Ly = np.amax(ya) - np.amin(ya)
         self.volume = types.SimpleNamespace()
 
-    def setup(self, scene_lengths, scene_deltas, Lxa, Lya, fc, bw, scene_offsets=None, delta_f_indx=1, method='RMA-NUFFT', pad_amount=100):
+    def setup(self, scene_lengths, scene_deltas, Lxa, Lya, fc, bw, scene_offsets=None, delta_f_indx=1, method='RMA-NUFFT', pad_amount=100, **kwargs):
+        
+        self.quiet = kwargs.get('quiet', True)
+        self.lp_filter = kwargs.get('lp_filter', False)
+        if self.lp_filter:
+            self.filter_radius = kwargs.get('filter_radius', 50)
+            self.filter_x_offset = kwargs.get('filter_x_offset', 0)
+            self.filter_y_offset = kwargs.get('filter_y_offset', 0)
 
         self.method = method
         if scene_offsets is None:
@@ -87,7 +101,10 @@ class MonostaticReconstruction():
             self.Kz = np.sqrt(4*K**2 - self.Kx**2 - self.Ky**2)
             self.evanescent_indx = np.where(np.imag(self.Kz)!=0)
             self.Kz[self.evanescent_indx] = 0
-            self.filt = np.nan_to_num(K / self.Kz**2)
+            self.filt = np.nan_to_num(self.Kz**2 / K)
+            if self.lp_filter:
+                filter_indx = np.where((self.Kx-self.filter_x_offset)**2 + (self.Ky-self.filter_y_offset)**2 < self.filter_radius**2)
+                self.filt[filter_indx] = 0 + 0j
 
             self.K_array = np.stack((np.real(self.Kx).flatten(), np.real(self.Ky).flatten(), np.real(self.Kz).flatten()), axis=1) * np.pi/(2*np.amax(k))   # normalizing to pi
 
@@ -127,7 +144,10 @@ class MonostaticReconstruction():
             self.evanescent_indx = np.where(np.imag(self.Kz)!=0)
             self.Kz[self.evanescent_indx] = 0
             self.Kz = np.real(self.Kz)
-            self.filt = np.nan_to_num(K / self.Kz**2)
+            self.filt = np.nan_to_num(self.Kz**2 / K)
+            if self.lp_filter:
+                filter_indx = np.where((self.Kx-self.filter_x_offset)**2 + (self.Ky-self.filter_y_offset)**2 < self.filter_radius**2)
+                self.filt[filter_indx] = 0 + 0j
 
     def reconstruct(self, measurements=None):
         
@@ -144,7 +164,19 @@ class MonostaticReconstruction():
                         axes=(0,1)), axes=(0,1)), axes=(0,1))
             
             measurements_ft[self.evanescent_indx] = 0
-            measurements_ft = measurements_ft * np.exp(1j * self.Kx * self.volume.x_offset) * np.exp(1j * self.Ky * self.volume.y_offset) * np.exp(1j * self.Kz * self.volume.z_offset) / self.filt
+            measurements_ft = measurements_ft * np.exp(1j * self.Kx * self.volume.x_offset) * np.exp(1j * self.Ky * self.volume.y_offset) * np.exp(1j * self.Kz * self.volume.z_offset) * self.filt
+            
+            if self.lp_filter:
+                if not self.quiet:
+                    filter_circle = plt.Circle((self.filter_x_offset, self.filter_y_offset), self.filter_radius, color='r', fill=False, label='Lowpass Filter')
+                    fig, ax = plt.subplots(1,1, figsize=(5,5))
+                    ax.imshow((np.abs(measurements_ft[:,:,0])), extent=(np.real(self.Kx.min()), np.real(self.Kx.max()), np.real(self.Ky.min()), np.real(self.Ky.max())), origin='lower')
+                    ax.add_patch(filter_circle)
+                    ax.set_xlabel('$k_x$')
+                    ax.set_ylabel('$k_y$')
+                    ax.legend(frameon=True)
+                    plt.show()
+            
             measurements_reshape = measurements_ft.flatten()
 
             self.image = self.NufftObj.adjoint(measurements_reshape)
