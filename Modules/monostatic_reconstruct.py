@@ -30,22 +30,26 @@ class MonostaticReconstruction():
         self.lam = C/self.f
         self.k = 2*np.pi/self.lam
         self.array = types.SimpleNamespace()
-        self.array.X = Xa
-        self.array.Y = Ya
+        self.array.X = Xa - Xa.mean()
+        self.array.Y = Ya - Ya.mean()
         self.indx_center_x = self.array.X.shape[1]//2
         self.indx_center_y = self.array.Y.shape[0]//2
         self.z_offset = z_offset
 
-        xa = np.unique(Xa)
-        ya = np.unique(Ya)
-        self.array.delta_x = xa[1] - xa[0]
-        self.array.delta_y = ya[1] - ya[0]
-        self.array.Lx = np.amax(xa) - np.amin(xa)
-        self.array.Ly = np.amax(ya) - np.amin(ya)
+        self.xa = np.unique(self.array.X)
+        self.ya = np.unique(self.array.Y)
+        self.array.delta_x = self.xa[1] - self.xa[0]
+        self.array.delta_y = self.ya[1] - self.ya[0]
+        self.array.Lx = np.amax(self.xa) - np.amin(self.xa)
+        self.array.Ly = np.amax(self.ya) - np.amin(self.ya)
         self.volume = types.SimpleNamespace()
 
-    def setup(self, scene_lengths, scene_deltas, Lxa, Lya, fc, bw, scene_offsets=None, delta_f_indx=1, method='RMA-NUFFT', pad_amount=100, **kwargs):
+    def setup(self, scene_lengths, scene_deltas, Lxa, Lya, fc, bw, aperture_center=None, scene_offsets=None, delta_f_indx=1, method='RMA-NUFFT', pad_amount=100, **kwargs):
         
+        self.aperture_center = aperture_center
+        if self.aperture_center is not None:
+            self.indx_center_x = np.argmin(np.abs(aperture_center[0] - self.xa))
+            self.indx_center_y = np.argmin(np.abs(aperture_center[1] - self.ya))
         self.quiet = kwargs.get('quiet', True)
         self.lp_filter = kwargs.get('lp_filter', False)
         if self.lp_filter:
@@ -88,7 +92,7 @@ class MonostaticReconstruction():
 
             dummy_array = np.ones((self.array.X.shape[0], self.array.X.shape[1]))
             dummy_array = dummy_array[int(self.indx_center_y-self.array.Lya_trunc//(2*self.array.delta_y)):int((self.indx_center_y+self.array.Lya_trunc//(2*self.array.delta_y))),
-                            int(self.indx_center_x-self.array.Lxa_trunc//(2*self.array.delta_x)):int((self.indx_center_x+self.array.Lxa_trunc//(2*self.array.delta_x)))]
+                                      int(self.indx_center_x-self.array.Lxa_trunc//(2*self.array.delta_x)):int((self.indx_center_x+self.array.Lxa_trunc//(2*self.array.delta_x)))]
 
             self.pad_amount = pad_amount
             dummy_pad = np.pad(dummy_array, ((self.pad_amount, self.pad_amount), (self.pad_amount, self.pad_amount)), mode='constant')
